@@ -15,7 +15,7 @@ st.set_page_config(page_title="INOVUES Gantt", layout="wide", page_icon="📊")
 # ─── Odoo connection ───────────────────────────────────────────
 ODOO_URL = os.environ.get("ODOO_URL", "https://inovues.odoo.com")
 ODOO_DB = os.environ.get("ODOO_DB", "inovues")
-ODOO_USER = os.environ.get("ODOO_USER", "stephan@inovues.com")
+ODOO_USER = os.environ.get("ODOO_USER", "sketterer@inovues.com")
 ODOO_API_KEY = os.environ.get("ODOO_API_KEY", "")
 
 
