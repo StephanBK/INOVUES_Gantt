@@ -12,10 +12,11 @@ from datetime import datetime, timedelta
 st.set_page_config(page_title="INOVUES Gantt", layout="wide", page_icon="📊")
 
 # ─── Odoo connection ───────────────────────────────────────────
-ODOO_URL = st.secrets.get("ODOO_URL", "https://inovues.odoo.com")
-ODOO_DB = st.secrets.get("ODOO_DB", "inovues")
-ODOO_USER = st.secrets.get("ODOO_USER", "stephan@inovues.com")
-ODOO_API_KEY = st.secrets.get("ODOO_API_KEY", "")
+import os
+ODOO_URL = os.environ.get("ODOO_URL", "https://inovues.odoo.com")
+ODOO_DB = os.environ.get("ODOO_DB", "inovues")
+ODOO_USER = os.environ.get("ODOO_USER", "stephan@inovues.com")
+ODOO_API_KEY = os.environ.get("ODOO_API_KEY", "")
 
 
 @st.cache_data(ttl=3600)
