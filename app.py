@@ -5,6 +5,7 @@ INOVUES Project Gantt — Cross-project Gantt chart with two-way Odoo sync.
 """
 
 import streamlit as st
+import streamlit.components.v1 as components
 import json
 import xmlrpc.client
 import os
@@ -312,7 +313,7 @@ except Exception as e:
 gantt_data, gantt_links, missing_dates, color_map = build_gantt_data(projects, tasks)
 
 html = build_gantt_html(gantt_data, gantt_links, color_map, projects)
-st.components.html(html, height=750, scrolling=False)
+components.html(html, height=750, scrolling=False)
 
 if missing_dates:
     with st.expander(f"⚠️ {len(missing_dates)} tasks missing dates — not on Gantt"):
