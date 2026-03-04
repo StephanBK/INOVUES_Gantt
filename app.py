@@ -6,13 +6,13 @@ INOVUES Project Gantt — Cross-project Gantt chart with two-way Odoo sync.
 
 import streamlit as st
 import json
-import requests
+import xmlrpc.client
+import os
 from datetime import datetime, timedelta
 
 st.set_page_config(page_title="INOVUES Gantt", layout="wide", page_icon="📊")
 
 # ─── Odoo connection ───────────────────────────────────────────
-import os
 ODOO_URL = os.environ.get("ODOO_URL", "https://inovues.odoo.com")
 ODOO_DB = os.environ.get("ODOO_DB", "inovues")
 ODOO_USER = os.environ.get("ODOO_USER", "stephan@inovues.com")
@@ -21,32 +21,18 @@ ODOO_API_KEY = os.environ.get("ODOO_API_KEY", "")
 
 @st.cache_data(ttl=3600)
 def get_uid():
-    payload = {
-        "jsonrpc": "2.0", "method": "call", "id": 0,
-        "params": {
-            "service": "common", "method": "authenticate",
-            "args": [ODOO_DB, ODOO_USER, ODOO_API_KEY, {}]
-        }
-    }
-    resp = requests.post(f"{ODOO_URL}/jsonrpc", json=payload, timeout=15)
-    return resp.json()["result"]
+    common = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/common")
+    uid = common.authenticate(ODOO_DB, ODOO_USER, ODOO_API_KEY, {})
+    if not uid:
+        raise Exception("Authentication failed — check ODOO_API_KEY env var.")
+    return uid
 
 
 def odoo_rpc(model, method, args=None, kwargs=None):
     uid = get_uid()
-    payload = {
-        "jsonrpc": "2.0", "method": "call", "id": 1,
-        "params": {
-            "service": "object", "method": "execute_kw",
-            "args": [ODOO_DB, uid, ODOO_API_KEY, model, method,
-                     args or [], kwargs or {}]
-        }
-    }
-    resp = requests.post(f"{ODOO_URL}/jsonrpc", json=payload, timeout=30)
-    result = resp.json()
-    if "error" in result:
-        raise Exception(result["error"].get("data", {}).get("message", str(result["error"])))
-    return result["result"]
+    models = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/object")
+    return models.execute_kw(ODOO_DB, uid, ODOO_API_KEY,
+                             model, method, args or [], kwargs or {})
 
 
 # ─── Process write-back actions BEFORE rendering ───────────────
