@@ -124,7 +124,6 @@ def build_gantt_data(projects, tasks):
             "type": "project",
             "open": True,
             "color": color_map[pid],
-            "render": "split",
         })
 
     for task in tasks:
