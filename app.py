@@ -334,13 +334,29 @@ def render_gantt_png(projects, tasks):
         tick.set_fontweight("bold" if row["is_header"] else "normal")
         tick.set_color("#1a1a2e" if row["is_header"] else "#333333")
 
-    # X axis
-    ax.xaxis.set_major_locator(mdates.MonthLocator())
-    ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %Y"))
-    ax.xaxis.set_minor_locator(mdates.WeekdayLocator(byweekday=0))
-    ax.grid(axis="x", which="major", color="#cccccc", linewidth=0.8, zorder=1)
-    ax.grid(axis="x", which="minor", color="#eeeeee", linewidth=0.4, zorder=1)
-    plt.xticks(rotation=30, ha="right", fontsize=8)
+    # X axis — two-tier: month band on top, week numbers below
+    # Primary ticks = Mondays (week labels), secondary = month starts (month labels)
+    ax.xaxis.set_major_locator(mdates.WeekdayLocator(byweekday=0))   # every Monday
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("W%W\n%d %b"))  # "W12\n24 Mar"
+    ax.xaxis.set_minor_locator(mdates.MonthLocator())
+    ax.tick_params(axis="x", which="major", labelsize=6.5, rotation=0, pad=2)
+    ax.tick_params(axis="x", which="minor", length=6)
+
+    # Month grid lines bold, week grid lines light
+    ax.grid(axis="x", which="major", color="#e0e0e0", linewidth=0.4, zorder=1)
+
+    # Draw bold month separator lines + month label above the axis
+    ax2 = ax.twiny()
+    ax2.set_xlim(ax.get_xlim())
+    ax2.xaxis.set_major_locator(mdates.MonthLocator())
+    ax2.xaxis.set_major_formatter(mdates.DateFormatter("%B %Y"))
+    ax2.tick_params(axis="x", which="major", labelsize=8, rotation=0,
+                    length=0, pad=4)
+    ax2.xaxis.set_tick_params(which="major")
+    # Bold vertical line at each month boundary
+    for mdate in mdates.num2date(ax2.xaxis.get_majorticklocs()):
+        ax.axvline(mdates.date2num(mdate.replace(tzinfo=None)),
+                   color="#aaaaaa", linewidth=0.9, zorder=1)
 
     # Today line
     ax.axvline(mdates.date2num(today), color="#DC143C", linewidth=2,
@@ -372,7 +388,12 @@ def render_gantt_png(projects, tasks):
 
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
-    plt.tight_layout(rect=[0, 0, 1, 0.97])
+    ax2.spines["top"].set_visible(False)
+    ax2.spines["right"].set_visible(False)
+    ax2.spines["left"].set_visible(False)
+    ax2.spines["bottom"].set_visible(False)
+
+    fig.subplots_adjust(left=0.18, right=0.98, top=0.93, bottom=0.08)
 
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=150, bbox_inches="tight",
