@@ -529,10 +529,14 @@ function applyStripes(){{
     var el = document.querySelector(".gantt_task_line[task_id='" + t.id + "']");
     if(!el) return;
     if(t.status === "in_progress"){{
-      el.style.backgroundImage = "repeating-linear-gradient(45deg, transparent 0px, transparent 5px, rgba(255,255,255,0.45) 5px, rgba(255,255,255,0.45) 10px)";
-      el.style.backgroundSize  = "14px 14px";
+      var baseColor = t.color || t.proj_color || "#888";
+      // Layer: solid project color first, then stripe on top
+      el.style.background = [
+        "repeating-linear-gradient(45deg, transparent 0px, transparent 5px, rgba(255,255,255,0.4) 5px, rgba(255,255,255,0.4) 10px)",
+        baseColor
+      ].join(", ");
     }} else {{
-      el.style.backgroundImage = "";
+      el.style.background = "";
     }}
   }});
 }}
