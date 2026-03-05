@@ -1,8 +1,9 @@
 """
 INOVUES Project Gantt — Cross-project Gantt chart with two-way Odoo sync.
-- Streamlit loads tasks from Odoo → renders DHTMLX Gantt via HTML component
-- Drag/resize/link → URL param redirect → Streamlit writes back to Odoo
-- Export PNG: server-side matplotlib render of ALL tasks across ALL projects
+Visual rules:
+  - Approved  → solid green bar
+  - In Progress → diagonal stripe pattern (project color)
+  - Other       → solid project color (fallback)
 """
 
 import streamlit as st
@@ -18,14 +19,29 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 from matplotlib.patches import FancyBboxPatch
+import matplotlib.patheffects as pe
+import numpy as np
 
 st.set_page_config(page_title="INOVUES Gantt", layout="wide", page_icon="📊")
 
-# ─── Odoo connection ───────────────────────────────────────────
-ODOO_URL  = os.environ.get("ODOO_URL",  "https://inovues.odoo.com")
-ODOO_DB   = os.environ.get("ODOO_DB",   "inovues")
-ODOO_USER = os.environ.get("ODOO_USER", "sketterer@inovues.com")
+# ─── Odoo connection ────────────────────────────────────────────
+ODOO_URL     = os.environ.get("ODOO_URL",  "https://inovues.odoo.com")
+ODOO_DB      = os.environ.get("ODOO_DB",   "inovues")
+ODOO_USER    = os.environ.get("ODOO_USER", "sketterer@inovues.com")
 ODOO_API_KEY = os.environ.get("ODOO_API_KEY", "")
+
+COLOR_APPROVED = "#27ae60"   # solid green
+
+
+def classify_stage(stage_name: str, state_val: str) -> str:
+    """Return 'approved', 'in_progress', or 'other' — robust to casing/spacing."""
+    s = (stage_name or "").strip().lower()
+    v = (state_val  or "").strip().lower()
+    if "approved" in s or "approved" in v:
+        return "approved"
+    if "progress" in s or "progress" in v or s == "in_progress" or v == "in_progress":
+        return "in_progress"
+    return "other"
 
 
 @st.cache_data(ttl=3600)
@@ -44,7 +60,7 @@ def odoo_rpc(model, method, args=None, kwargs=None):
                              model, method, args or [], kwargs or {})
 
 
-# ─── Process write-back actions BEFORE rendering ───────────────
+# ─── Write-back actions ─────────────────────────────────────────
 params = st.query_params
 action = params.get("gantt_action", None)
 write_status = None
@@ -56,10 +72,8 @@ if action == "update_task":
     if task_id and start and end:
         try:
             odoo_rpc("project.task", "write",
-                     [[task_id], {
-                         "planned_date_begin": f"{start} 08:00:00",
-                         "date_deadline":      f"{end} 17:00:00"
-                     }])
+                     [[task_id], {"planned_date_begin": f"{start} 08:00:00",
+                                  "date_deadline":      f"{end} 17:00:00"}])
             write_status = ("success", f"Updated task #{task_id}: {start} → {end}")
             st.cache_data.clear()
         except Exception as e:
@@ -93,12 +107,11 @@ elif action == "delete_link":
     st.query_params.clear()
 
 
-# ─── Load data ─────────────────────────────────────────────────
+# ─── Load data ──────────────────────────────────────────────────
 @st.cache_data(ttl=60)
 def load_projects():
     return odoo_rpc("project.project", "search_read", [[]],
                     {"fields": ["name", "task_count"], "order": "name asc"})
-
 
 @st.cache_data(ttl=60)
 def load_tasks():
@@ -110,15 +123,13 @@ def load_tasks():
                      "order": "project_id, sequence", "limit": 1000})
 
 
-# ─── Colors ────────────────────────────────────────────────────
 PROJECT_COLORS = [
     "#2E86AB", "#A23B72", "#F18F01", "#C73E1D",
     "#3B1F2B", "#44BBA4", "#E94F37", "#393E41"
 ]
-COLOR_APPROVED    = "#27ae60"   # green  — stage == "Approved"
-COLOR_IN_PROGRESS = None        # uses project color — stage == "In Progress" (or anything else)
 
 
+# ─── Build data for interactive Gantt ───────────────────────────
 def build_gantt_data(projects, tasks, selected_project_ids):
     gantt_data    = []
     gantt_links   = []
@@ -130,13 +141,9 @@ def build_gantt_data(projects, tasks, selected_project_ids):
         color_map[pid] = PROJECT_COLORS[i % len(PROJECT_COLORS)]
         if pid not in selected_project_ids:
             continue
-        gantt_data.append({
-            "id":    f"p_{pid}",
-            "text":  proj["name"],
-            "type":  "project",
-            "open":  True,
-            "color": color_map[pid],
-        })
+        gantt_data.append({"id": f"p_{pid}", "text": proj["name"],
+                            "type": "project", "open": True,
+                            "color": color_map[pid]})
 
     for task in tasks:
         if not task["project_id"]:
@@ -147,31 +154,30 @@ def build_gantt_data(projects, tasks, selected_project_ids):
 
         start = task.get("planned_date_begin")
         end   = task.get("date_deadline")
-
         if not start and not end:
             missing_dates.append(task)
             continue
-
         if start and not end:
-            end_dt = datetime.strptime(start[:10], "%Y-%m-%d") + timedelta(days=1)
-            end = end_dt.strftime("%Y-%m-%d")
+            end = (datetime.strptime(start[:10], "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
         elif end and not start:
-            start_dt = datetime.strptime(end[:10], "%Y-%m-%d") - timedelta(days=1)
-            start = start_dt.strftime("%Y-%m-%d")
+            start = (datetime.strptime(end[:10], "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
 
         start_str = start[:10]
         end_str   = end[:10]
         try:
-            dur = max((datetime.strptime(end_str,   "%Y-%m-%d") -
+            dur = max((datetime.strptime(end_str, "%Y-%m-%d") -
                        datetime.strptime(start_str, "%Y-%m-%d")).days, 1)
         except (ValueError, TypeError):
             dur = 1
 
-        stage       = task["stage_id"][1] if task["stage_id"] else ""
-        task_state  = task.get("state", "")
-        is_approved = (stage.strip().lower() == "approved")
+        stage      = task["stage_id"][1] if task["stage_id"] else ""
+        task_state = task.get("state", "")
+        status     = classify_stage(stage, task_state)
+        proj_color = color_map.get(proj_id, "#999")
 
-        bar_color = COLOR_APPROVED if is_approved else color_map.get(proj_id, "#999")
+        # For the interactive chart: approved=green, in_progress=project color
+        # The stripe pattern is handled via CSS background on the bar element
+        bar_color = COLOR_APPROVED if status == "approved" else proj_color
 
         gantt_data.append({
             "id":          task["id"],
@@ -180,45 +186,35 @@ def build_gantt_data(projects, tasks, selected_project_ids):
             "duration":    dur,
             "parent":      f"p_{proj_id}",
             "color":       bar_color,
+            "proj_color":  proj_color,
             "stage":       stage,
             "state":       task_state,
-            "is_approved": is_approved,
+            "status":      status,   # 'approved' | 'in_progress' | 'other'
             "odoo_id":     task["id"],
         })
 
         for dep_id in task.get("depend_on_ids", []):
-            gantt_links.append({
-                "id":     f"L{dep_id}_{task['id']}",
-                "source": dep_id,
-                "target": task["id"],
-                "type":   "0",
-            })
+            gantt_links.append({"id": f"L{dep_id}_{task['id']}",
+                                 "source": dep_id, "target": task["id"], "type": "0"})
 
     return gantt_data, gantt_links, missing_dates, color_map
 
 
-# ─── Server-side PNG export (matplotlib) ───────────────────────
-def render_gantt_png(projects, tasks, color_map):
-    """Render ALL tasks from ALL projects into a matplotlib PNG — no scroll limits."""
-
-    # Build rows: project header + tasks, all projects
-    all_project_ids = {p["id"] for p in projects}
-
-    # Build project color map for all projects (not just selected)
+# ─── Server-side PNG export ──────────────────────────────────────
+def render_gantt_png(projects, tasks):
     full_color_map = {}
     for i, proj in enumerate(projects):
         full_color_map[proj["id"]] = PROJECT_COLORS[i % len(PROJECT_COLORS)]
 
-    rows = []   # list of dicts: {label, start, end, color, is_header}
     proj_task_map = {}
     for task in tasks:
         if not task["project_id"]:
             continue
-        pid = task["project_id"][0]
-        proj_task_map.setdefault(pid, []).append(task)
+        proj_task_map.setdefault(task["project_id"][0], []).append(task)
 
+    rows = []
     for proj in projects:
-        pid   = proj["id"]
+        pid    = proj["id"]
         ptasks = proj_task_map.get(pid, [])
         dated  = []
         for t in ptasks:
@@ -235,61 +231,51 @@ def render_gantt_png(projects, tasks, color_map):
         if not dated:
             continue
 
-        # Project header row
         all_starts = [datetime.strptime(s, "%Y-%m-%d") for _, s, _ in dated]
         all_ends   = [datetime.strptime(e, "%Y-%m-%d") for _, _, e in dated]
-        rows.append({
-            "label":     proj["name"],
-            "start":     min(all_starts),
-            "end":       max(all_ends),
-            "color":     full_color_map.get(pid, "#666"),
-            "is_header": True,
-        })
+        rows.append({"label": proj["name"], "start": min(all_starts),
+                     "end": max(all_ends), "color": full_color_map.get(pid, "#666"),
+                     "is_header": True, "status": "header",
+                     "proj_color": full_color_map.get(pid, "#666")})
 
         for t, s, e in dated:
-            stage       = t["stage_id"][1] if t["stage_id"] else ""
-            task_state  = t.get("state", "")
-            is_approved = (stage.strip().lower() == "approved")
-
-            bar_color = COLOR_APPROVED if is_approved else full_color_map.get(pid, "#999")
-
-            rows.append({
-                "label":     f"  {t['name']}",
-                "start":     datetime.strptime(s, "%Y-%m-%d"),
-                "end":       datetime.strptime(e, "%Y-%m-%d"),
-                "color":     bar_color,
-                "is_header": False,
-            })
+            stage      = t["stage_id"][1] if t["stage_id"] else ""
+            task_state = t.get("state", "")
+            status     = classify_stage(stage, task_state)
+            proj_color = full_color_map.get(pid, "#999")
+            bar_color  = COLOR_APPROVED if status == "approved" else proj_color
+            rows.append({"label": f"  {t['name']}", "start": datetime.strptime(s, "%Y-%m-%d"),
+                         "end": datetime.strptime(e, "%Y-%m-%d"), "color": bar_color,
+                         "is_header": False, "status": status, "proj_color": proj_color})
 
     if not rows:
         return None
 
-    n_rows      = len(rows)
-    row_height  = 0.38   # inches per row
-    fig_height  = max(8, n_rows * row_height + 3)
-    fig_width   = 28
+    import matplotlib.dates as mdates
+
+    n_rows     = len(rows)
+    row_height = 0.38
+    fig_height = max(8, n_rows * row_height + 3)
+    fig_width  = 28
 
     fig, ax = plt.subplots(figsize=(fig_width, fig_height))
     fig.patch.set_facecolor("#f8f9fa")
     ax.set_facecolor("#ffffff")
 
     today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-
-    # X axis: span all dates with 2-week padding
     all_starts = [r["start"] for r in rows]
     all_ends   = [r["end"]   for r in rows]
     x_min = min(all_starts) - timedelta(days=14)
     x_max = max(all_ends)   + timedelta(days=14)
 
-    import matplotlib.dates as mdates
     ax.set_xlim(x_min, x_max)
     ax.set_ylim(-0.5, n_rows - 0.5)
     ax.invert_yaxis()
 
     # Alternating row backgrounds
     for i in range(n_rows):
-        bg = "#f0f4f8" if i % 2 == 0 else "#ffffff"
-        ax.axhspan(i - 0.5, i + 0.5, color=bg, zorder=0)
+        ax.axhspan(i - 0.5, i + 0.5,
+                   color="#f0f4f8" if i % 2 == 0 else "#ffffff", zorder=0)
 
     # Weekend shading
     d = x_min
@@ -306,37 +292,50 @@ def render_gantt_png(projects, tasks, color_map):
         h   = 0.55 if row["is_header"] else 0.45
         y   = i - h / 2
 
-        # Bar
-        rect = FancyBboxPatch(
-            (s, y), dur, h,
-            boxstyle="round,pad=0.01",
-            facecolor=row["color"],
-            edgecolor="white",
-            linewidth=0.6,
-            zorder=2,
-        )
-        ax.add_patch(rect)
+        if row["status"] == "in_progress":
+            # Draw base bar (slightly transparent)
+            base = FancyBboxPatch((s, y), dur, h,
+                                  boxstyle="round,pad=0.01",
+                                  facecolor=row["proj_color"],
+                                  edgecolor="white", linewidth=0.6,
+                                  alpha=0.35, zorder=2)
+            ax.add_patch(base)
+
+            # Diagonal stripe overlay using hatch
+            hatch_bar = FancyBboxPatch((s, y), dur, h,
+                                       boxstyle="round,pad=0.01",
+                                       facecolor="none",
+                                       edgecolor=row["proj_color"],
+                                       linewidth=0.8,
+                                       hatch="////",
+                                       zorder=3)
+            ax.add_patch(hatch_bar)
+        else:
+            # Solid bar (approved = green, header = project color, other = project color)
+            rect = FancyBboxPatch((s, y), dur, h,
+                                  boxstyle="round,pad=0.01",
+                                  facecolor=row["color"],
+                                  edgecolor="white", linewidth=0.6,
+                                  zorder=2)
+            ax.add_patch(rect)
 
         fontsize   = 7.5 if row["is_header"] else 6.5
         fontweight = "bold" if row["is_header"] else "normal"
+        txt_color  = "white" if row["status"] != "in_progress" else row["proj_color"]
         mid = s + dur / 2
         ax.text(mid, i, row["label"].strip(),
                 ha="center", va="center",
                 fontsize=fontsize, fontweight=fontweight,
-                color="white",
-                clip_on=True, zorder=3)
+                color=txt_color, clip_on=True, zorder=4)
 
     # Y-axis labels
     ax.set_yticks(range(n_rows))
-    ax.set_yticklabels(
-        [r["label"] for r in rows],
-        fontsize=7, fontfamily="monospace"
-    )
+    ax.set_yticklabels([r["label"] for r in rows], fontsize=7, fontfamily="monospace")
     for tick, row in zip(ax.get_yticklabels(), rows):
         tick.set_fontweight("bold" if row["is_header"] else "normal")
         tick.set_color("#1a1a2e" if row["is_header"] else "#333333")
 
-    # X axis — month + week grid
+    # X axis
     ax.xaxis.set_major_locator(mdates.MonthLocator())
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %Y"))
     ax.xaxis.set_minor_locator(mdates.WeekdayLocator(byweekday=0))
@@ -346,27 +345,28 @@ def render_gantt_png(projects, tasks, color_map):
 
     # Today line
     ax.axvline(mdates.date2num(today), color="#DC143C", linewidth=2,
-               linestyle="--", zorder=4, label="Today")
+               linestyle="--", zorder=5)
     ax.text(mdates.date2num(today), -0.4, "TODAY",
             color="#DC143C", fontsize=7, fontweight="bold",
-            ha="center", va="top", zorder=5)
+            ha="center", va="top", zorder=6)
 
     # Legend
     legend_patches = []
-    seen_projects = {}
     for proj in projects:
         pid = proj["id"]
         if pid in full_color_map:
-            seen_projects[proj["name"]] = full_color_map[pid]
-    for name, color in seen_projects.items():
-        legend_patches.append(mpatches.Patch(color=color, label=name))
-    legend_patches.append(mpatches.Patch(color=COLOR_APPROVED, label="Approved ✓"))
+            legend_patches.append(mpatches.Patch(
+                color=full_color_map[pid], label=proj["name"]))
+    legend_patches.append(mpatches.Patch(color=COLOR_APPROVED, label="✓ Approved (solid)"))
+    # In Progress swatch: show hatch
+    ip_patch = mpatches.Patch(facecolor="#aaaaaa", edgecolor="#555555",
+                               hatch="////", label="⟳ In Progress (striped)")
+    legend_patches.append(ip_patch)
 
-    ax.legend(handles=legend_patches, loc="upper left",
-              fontsize=7, framealpha=0.9, ncol=min(len(legend_patches), 6),
+    ax.legend(handles=legend_patches, loc="upper left", fontsize=7,
+              framealpha=0.9, ncol=min(len(legend_patches), 6),
               bbox_to_anchor=(0, 1.02), borderaxespad=0)
 
-    # Title
     ts = today.strftime("%B %d, %Y")
     fig.suptitle(f"INOVUES — Full Project Gantt   ·   {ts}",
                  fontsize=13, fontweight="bold", color="#1a1a2e", y=0.99)
@@ -383,6 +383,7 @@ def render_gantt_png(projects, tasks, color_map):
     return buf
 
 
+# ─── HTML Gantt ─────────────────────────────────────────────────
 def build_gantt_html(gantt_data, gantt_links, color_map, projects, selected_project_ids):
     legend_html = "".join([
         f'<div class="lg-i">'
@@ -394,6 +395,10 @@ def build_gantt_html(gantt_data, gantt_links, color_map, projects, selected_proj
     legend_html += (
         f'<div class="lg-i"><div class="lg-d" style="background:{COLOR_APPROVED}"></div>'
         f'<span>Approved</span></div>'
+        f'<div class="lg-i">'
+        f'<div class="lg-d" style="background:repeating-linear-gradient('
+        f'45deg,#888 0px,#888 3px,#ccc 3px,#ccc 7px)"></div>'
+        f'<span>In Progress</span></div>'
     )
 
     today_str = datetime.now().strftime("%Y-%m-%d")
@@ -408,8 +413,20 @@ html,body{{margin:0;padding:0;height:100%;overflow:hidden;font-family:'Segoe UI'
 #gantt_here{{width:100%;height:calc(100vh - 44px)}}
 .project_row{{font-weight:700;background:#f0f0f0!important}}
 .project_row .gantt_cell{{font-weight:700}}
-.gantt_task_content{{font-size:11px;font-weight:500;color:#fff;text-shadow:0 1px 2px rgba(0,0,0,.3)}}
-.approved .gantt_task_content{{font-weight:700;letter-spacing:0.2px}}
+.gantt_task_content{{font-size:11px;font-weight:500;color:#fff;text-shadow:0 1px 2px rgba(0,0,0,.4)}}
+/* Approved: solid, bold label */
+.approved .gantt_task_content{{font-weight:700}}
+/* In Progress: diagonal stripe over project color */
+.in_progress .gantt_task_line{{
+  background-image: repeating-linear-gradient(
+    45deg,
+    transparent,
+    transparent 4px,
+    rgba(255,255,255,0.35) 4px,
+    rgba(255,255,255,0.35) 8px
+  ) !important;
+}}
+.in_progress .gantt_task_content{{opacity:0.95}}
 .gantt_link_arrow{{border-color:#e74c3c!important}}
 .gantt_line_wrapper div{{background-color:#e74c3c!important}}
 .gantt_marker{{background:rgba(220,20,60,0.12);border-left:2px solid #DC143C}}
@@ -422,7 +439,7 @@ html,body{{margin:0;padding:0;height:100%;overflow:hidden;font-family:'Segoe UI'
 #tb button:hover{{background:#0f3460}}
 .lg{{display:flex;gap:12px;align-items:center;margin-left:16px;flex-wrap:wrap}}
 .lg-i{{display:flex;align-items:center;gap:4px;font-size:11px}}
-.lg-d{{width:10px;height:10px;border-radius:2px}}
+.lg-d{{width:14px;height:10px;border-radius:2px;border:1px solid rgba(255,255,255,0.2)}}
 #st{{margin-left:auto;opacity:.6;font-size:12px}}
 </style></head><body>
 <div id="tb">
@@ -451,7 +468,7 @@ gantt.config.columns = [
   {{name:"text",       label:"Task",  tree:true, width:260, resize:true}},
   {{name:"start_date", label:"Start", align:"center", width:85}},
   {{name:"duration",   label:"Days",  align:"center", width:45}},
-  {{name:"stage",      label:"Stage", align:"center", width:100, resize:true}}
+  {{name:"stage",      label:"Stage", align:"center", width:110, resize:true}}
 ];
 gantt.ext.zoom.init({{levels:[
   {{name:"Days",     scale_height:60, min_column_width:30,
@@ -469,7 +486,8 @@ gantt.templates.grid_row_class = function(s,e,t){{
   return t.type === "project" ? "project_row" : "";
 }};
 gantt.templates.task_class = function(s,e,t){{
-  if(t.is_approved) return "approved";
+  if(t.status === "approved")    return "approved";
+  if(t.status === "in_progress") return "in_progress";
   return "";
 }};
 
@@ -477,38 +495,26 @@ gantt.init("gantt_here");
 gantt.parse({data_json});
 
 var todayDate = gantt.date.str_to_date("%Y-%m-%d")("{today_str}");
-gantt.addMarker({{
-  start_date: todayDate,
-  css:   "today",
-  text:  "Today",
-  title: "Today: {today_str}"
-}});
+gantt.addMarker({{start_date:todayDate, css:"today", text:"Today", title:"Today: {today_str}"}});
 
 var stEl = document.getElementById('st');
-function ss(m){{ stEl.textContent = m; setTimeout(()=>stEl.textContent='Ready', 3000); }}
+function ss(m){{ stEl.textContent=m; setTimeout(()=>stEl.textContent='Ready',3000); }}
+function nav(p){{ window.parent.location.search='?'+new URLSearchParams(p).toString(); }}
 
-function nav(p){{
-  var qs = new URLSearchParams(p).toString();
-  window.parent.location.search = '?' + qs;
-}}
-
-gantt.attachEvent("onAfterTaskDrag", function(id, mode){{
-  var t = gantt.getTask(id);
-  if(t.type === "project") return;
-  var fmt = gantt.date.date_to_str("%Y-%m-%d");
+gantt.attachEvent("onAfterTaskDrag",function(id,mode){{
+  var t=gantt.getTask(id);
+  if(t.type==="project")return;
+  var fmt=gantt.date.date_to_str("%Y-%m-%d");
   ss("Saving...");
-  nav({{gantt_action:"update_task", tid:t.odoo_id||id,
-        s:fmt(t.start_date), e:fmt(t.end_date)}});
+  nav({{gantt_action:"update_task",tid:t.odoo_id||id,s:fmt(t.start_date),e:fmt(t.end_date)}});
 }});
-
-gantt.attachEvent("onAfterLinkAdd", function(id, link){{
+gantt.attachEvent("onAfterLinkAdd",function(id,link){{
   ss("Saving dependency...");
-  nav({{gantt_action:"add_link", src:link.source, tgt:link.target}});
+  nav({{gantt_action:"add_link",src:link.source,tgt:link.target}});
 }});
-
-gantt.attachEvent("onAfterLinkDelete", function(id, link){{
+gantt.attachEvent("onAfterLinkDelete",function(id,link){{
   ss("Removing dependency...");
-  nav({{gantt_action:"delete_link", src:link.source, tgt:link.target}});
+  nav({{gantt_action:"delete_link",src:link.source,tgt:link.target}});
 }});
 
 function eAll(){{ gantt.eachTask(t=>{{t.$open=true}});  gantt.render(); }}
@@ -516,7 +522,7 @@ function cAll(){{ gantt.eachTask(t=>{{t.$open=false}}); gantt.render(); }}
 </script></body></html>"""
 
 
-# ─── Sidebar: project filter + refresh + export ────────────────
+# ─── Sidebar ────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("### 📁 Projects")
 
@@ -535,7 +541,7 @@ with st.sidebar:
 
     col1, col2 = st.columns(2)
     with col1:
-        if st.button("All", use_container_width=True):
+        if st.button("All",  use_container_width=True):
             st.session_state.selected_projects = all_project_ids[:]
             st.rerun()
     with col2:
@@ -552,7 +558,6 @@ with st.sidebar:
             st.session_state.selected_projects.remove(pid)
 
     st.markdown("---")
-
     if st.button("🔄 Refresh from Odoo", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
@@ -560,25 +565,33 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("### 📸 Export")
-    st.caption("Exports **all tasks across all projects** regardless of current filter.")
-
+    st.caption("All tasks · all projects · ignores filter")
     if st.button("Generate PNG", use_container_width=True, type="primary"):
         with st.spinner("Rendering full Gantt…"):
-            png_buf = render_gantt_png(projects, tasks, {})
+            png_buf = render_gantt_png(projects, tasks)
         if png_buf:
             fname = f"INOVUES_Gantt_{datetime.now().strftime('%Y-%m-%d')}.png"
-            st.download_button(
-                label="⬇️ Download PNG",
-                data=png_buf,
-                file_name=fname,
-                mime="image/png",
-                use_container_width=True,
-            )
+            st.download_button("⬇️ Download PNG", data=png_buf,
+                               file_name=fname, mime="image/png",
+                               use_container_width=True)
         else:
-            st.warning("No tasks with dates found to export.")
+            st.warning("No tasks with dates found.")
+
+    # ── Debug: show raw stage values so you can verify matching ──
+    st.markdown("---")
+    with st.expander("🔍 Debug — raw stage values"):
+        stage_counts = {}
+        for t in tasks:
+            sname = t["stage_id"][1] if t["stage_id"] else "(none)"
+            sval  = t.get("state", "(none)")
+            cls   = classify_stage(sname, sval)
+            key   = f"stage='{sname}'  state='{sval}'  → {cls}"
+            stage_counts[key] = stage_counts.get(key, 0) + 1
+        for k, v in sorted(stage_counts.items(), key=lambda x: -x[1]):
+            st.caption(f"{v}× {k}")
 
 
-# ─── Render ────────────────────────────────────────────────────
+# ─── Main render ────────────────────────────────────────────────
 st.markdown("""<style>
 .block-container{padding-top:.5rem;padding-bottom:0}
 header{visibility:hidden}
@@ -590,11 +603,8 @@ if write_status:
     st.toast(msg, icon="✅" if kind == "success" else "❌")
 
 selected_ids = st.session_state.get("selected_projects", all_project_ids)
-
 gantt_data, gantt_links, missing_dates, color_map = build_gantt_data(
-    projects, tasks, set(selected_ids)
-)
-
+    projects, tasks, set(selected_ids))
 html = build_gantt_html(gantt_data, gantt_links, color_map, projects, set(selected_ids))
 components.html(html, height=750, scrolling=False)
 
