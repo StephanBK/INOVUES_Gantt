@@ -115,8 +115,8 @@ PROJECT_COLORS = [
     "#2E86AB", "#A23B72", "#F18F01", "#C73E1D",
     "#3B1F2B", "#44BBA4", "#E94F37", "#393E41"
 ]
-COLOR_APPROVED = "#27ae60"
-COLOR_CANCELED = "#999999"
+COLOR_APPROVED    = "#27ae60"   # green  — stage == "Approved"
+COLOR_IN_PROGRESS = None        # uses project color — stage == "In Progress" (or anything else)
 
 
 def build_gantt_data(projects, tasks, selected_project_ids):
@@ -169,15 +169,9 @@ def build_gantt_data(projects, tasks, selected_project_ids):
 
         stage       = task["stage_id"][1] if task["stage_id"] else ""
         task_state  = task.get("state", "")
-        is_canceled = (task_state == "1_canceled")
         is_approved = (stage.strip().lower() == "approved")
 
-        if is_canceled:
-            bar_color = COLOR_CANCELED
-        elif is_approved:
-            bar_color = COLOR_APPROVED
-        else:
-            bar_color = color_map.get(proj_id, "#999")
+        bar_color = COLOR_APPROVED if is_approved else color_map.get(proj_id, "#999")
 
         gantt_data.append({
             "id":          task["id"],
@@ -189,7 +183,6 @@ def build_gantt_data(projects, tasks, selected_project_ids):
             "stage":       stage,
             "state":       task_state,
             "is_approved": is_approved,
-            "is_canceled": is_canceled,
             "odoo_id":     task["id"],
         })
 
@@ -216,7 +209,7 @@ def render_gantt_png(projects, tasks, color_map):
     for i, proj in enumerate(projects):
         full_color_map[proj["id"]] = PROJECT_COLORS[i % len(PROJECT_COLORS)]
 
-    rows = []   # list of dicts: {label, start, end, color, is_header, is_canceled}
+    rows = []   # list of dicts: {label, start, end, color, is_header}
     proj_task_map = {}
     for task in tasks:
         if not task["project_id"]:
@@ -246,34 +239,26 @@ def render_gantt_png(projects, tasks, color_map):
         all_starts = [datetime.strptime(s, "%Y-%m-%d") for _, s, _ in dated]
         all_ends   = [datetime.strptime(e, "%Y-%m-%d") for _, _, e in dated]
         rows.append({
-            "label":       proj["name"],
-            "start":       min(all_starts),
-            "end":         max(all_ends),
-            "color":       full_color_map.get(pid, "#666"),
-            "is_header":   True,
-            "is_canceled": False,
+            "label":     proj["name"],
+            "start":     min(all_starts),
+            "end":       max(all_ends),
+            "color":     full_color_map.get(pid, "#666"),
+            "is_header": True,
         })
 
         for t, s, e in dated:
             stage       = t["stage_id"][1] if t["stage_id"] else ""
             task_state  = t.get("state", "")
-            is_canceled = (task_state == "1_canceled")
             is_approved = (stage.strip().lower() == "approved")
 
-            if is_canceled:
-                bar_color = COLOR_CANCELED
-            elif is_approved:
-                bar_color = COLOR_APPROVED
-            else:
-                bar_color = full_color_map.get(pid, "#999")
+            bar_color = COLOR_APPROVED if is_approved else full_color_map.get(pid, "#999")
 
             rows.append({
-                "label":       f"  {t['name']}",
-                "start":       datetime.strptime(s, "%Y-%m-%d"),
-                "end":         datetime.strptime(e, "%Y-%m-%d"),
-                "color":       bar_color,
-                "is_header":   False,
-                "is_canceled": is_canceled,
+                "label":     f"  {t['name']}",
+                "start":     datetime.strptime(s, "%Y-%m-%d"),
+                "end":       datetime.strptime(e, "%Y-%m-%d"),
+                "color":     bar_color,
+                "is_header": False,
             })
 
     if not rows:
@@ -328,16 +313,11 @@ def render_gantt_png(projects, tasks, color_map):
             facecolor=row["color"],
             edgecolor="white",
             linewidth=0.6,
-            alpha=0.55 if row["is_canceled"] else 1.0,
             zorder=2,
         )
         ax.add_patch(rect)
 
-        # Label inside bar
-        label = row["label"]
-        if row["is_canceled"]:
-            label = f"~~{label.strip()}~~"  # visual hint only; matplotlib won't strikethrough
-        fontsize  = 7.5 if row["is_header"] else 6.5
+        fontsize   = 7.5 if row["is_header"] else 6.5
         fontweight = "bold" if row["is_header"] else "normal"
         mid = s + dur / 2
         ax.text(mid, i, row["label"].strip(),
@@ -380,8 +360,7 @@ def render_gantt_png(projects, tasks, color_map):
             seen_projects[proj["name"]] = full_color_map[pid]
     for name, color in seen_projects.items():
         legend_patches.append(mpatches.Patch(color=color, label=name))
-    legend_patches.append(mpatches.Patch(color=COLOR_APPROVED, label="Approved"))
-    legend_patches.append(mpatches.Patch(color=COLOR_CANCELED, label="Canceled", alpha=0.5))
+    legend_patches.append(mpatches.Patch(color=COLOR_APPROVED, label="Approved ✓"))
 
     ax.legend(handles=legend_patches, loc="upper left",
               fontsize=7, framealpha=0.9, ncol=min(len(legend_patches), 6),
@@ -415,8 +394,6 @@ def build_gantt_html(gantt_data, gantt_links, color_map, projects, selected_proj
     legend_html += (
         f'<div class="lg-i"><div class="lg-d" style="background:{COLOR_APPROVED}"></div>'
         f'<span>Approved</span></div>'
-        f'<div class="lg-i"><div class="lg-d" style="background:{COLOR_CANCELED}"></div>'
-        f'<span>Canceled</span></div>'
     )
 
     today_str = datetime.now().strftime("%Y-%m-%d")
@@ -432,9 +409,7 @@ html,body{{margin:0;padding:0;height:100%;overflow:hidden;font-family:'Segoe UI'
 .project_row{{font-weight:700;background:#f0f0f0!important}}
 .project_row .gantt_cell{{font-weight:700}}
 .gantt_task_content{{font-size:11px;font-weight:500;color:#fff;text-shadow:0 1px 2px rgba(0,0,0,.3)}}
-.canceled .gantt_task_content{{text-decoration:line-through}}
-.canceled{{opacity:.5}}
-.approved .gantt_task_content{{font-weight:700}}
+.approved .gantt_task_content{{font-weight:700;letter-spacing:0.2px}}
 .gantt_link_arrow{{border-color:#e74c3c!important}}
 .gantt_line_wrapper div{{background-color:#e74c3c!important}}
 .gantt_marker{{background:rgba(220,20,60,0.12);border-left:2px solid #DC143C}}
@@ -494,7 +469,6 @@ gantt.templates.grid_row_class = function(s,e,t){{
   return t.type === "project" ? "project_row" : "";
 }};
 gantt.templates.task_class = function(s,e,t){{
-  if(t.is_canceled) return "canceled";
   if(t.is_approved) return "approved";
   return "";
 }};
