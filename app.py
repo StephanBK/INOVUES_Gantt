@@ -529,8 +529,15 @@ function applyStripes(){{
     var el = document.querySelector(".gantt_task_line[task_id='" + t.id + "']");
     if(!el) return;
     if(t.status === "in_progress"){{
-      var baseColor = t.color || t.proj_color || "#888";
-      // Layer: solid project color first, then stripe on top
+      // Read the color DHTMLX already painted on the element
+      var computed  = window.getComputedStyle(el).backgroundColor;
+      var inlineCol = el.style.backgroundColor;
+      console.log("IN_PROGRESS task:", t.id, t.text,
+                  "| t.color:", t.color,
+                  "| t.proj_color:", t.proj_color,
+                  "| el.style.backgroundColor:", inlineCol,
+                  "| computed backgroundColor:", computed);
+      var baseColor = inlineCol || t.color || t.proj_color || "#888";
       el.style.background = [
         "repeating-linear-gradient(45deg, transparent 0px, transparent 5px, rgba(255,255,255,0.4) 5px, rgba(255,255,255,0.4) 10px)",
         baseColor
