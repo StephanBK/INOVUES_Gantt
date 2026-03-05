@@ -2,13 +2,7 @@
 INOVUES Project Gantt — Cross-project Gantt chart with two-way Odoo sync.
 - Streamlit loads tasks from Odoo → renders DHTMLX Gantt via HTML component
 - Drag/resize/link → URL param redirect → Streamlit writes back to Odoo
-
-Improvements:
-  1. Project filter sidebar (multiselect show/hide)
-  2. Today marker (red vertical line)
-  3. Status colors: Approved = green, Canceled = faded/strikethrough
-  4. Manual refresh button (clears cache on demand)
-  + Export PNG button (downloads full Gantt as image)
+- Export PNG: server-side matplotlib render of ALL tasks across ALL projects
 """
 
 import streamlit as st
@@ -16,7 +10,14 @@ import streamlit.components.v1 as components
 import json
 import xmlrpc.client
 import os
+import io
 from datetime import datetime, timedelta
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+from matplotlib.patches import FancyBboxPatch
 
 st.set_page_config(page_title="INOVUES Gantt", layout="wide", page_icon="📊")
 
@@ -114,9 +115,8 @@ PROJECT_COLORS = [
     "#2E86AB", "#A23B72", "#F18F01", "#C73E1D",
     "#3B1F2B", "#44BBA4", "#E94F37", "#393E41"
 ]
-
-COLOR_APPROVED = "#27ae60"   # green  — stage == "Approved"
-COLOR_CANCELED = "#999999"   # gray   — state == "1_canceled"
+COLOR_APPROVED = "#27ae60"
+COLOR_CANCELED = "#999999"
 
 
 def build_gantt_data(projects, tasks, selected_project_ids):
@@ -128,10 +128,8 @@ def build_gantt_data(projects, tasks, selected_project_ids):
     for i, proj in enumerate(projects):
         pid = proj["id"]
         color_map[pid] = PROJECT_COLORS[i % len(PROJECT_COLORS)]
-
         if pid not in selected_project_ids:
             continue
-
         gantt_data.append({
             "id":    f"p_{pid}",
             "text":  proj["name"],
@@ -144,7 +142,6 @@ def build_gantt_data(projects, tasks, selected_project_ids):
         if not task["project_id"]:
             continue
         proj_id = task["project_id"][0]
-
         if proj_id not in selected_project_ids:
             continue
 
@@ -207,6 +204,206 @@ def build_gantt_data(projects, tasks, selected_project_ids):
     return gantt_data, gantt_links, missing_dates, color_map
 
 
+# ─── Server-side PNG export (matplotlib) ───────────────────────
+def render_gantt_png(projects, tasks, color_map):
+    """Render ALL tasks from ALL projects into a matplotlib PNG — no scroll limits."""
+
+    # Build rows: project header + tasks, all projects
+    all_project_ids = {p["id"] for p in projects}
+
+    # Build project color map for all projects (not just selected)
+    full_color_map = {}
+    for i, proj in enumerate(projects):
+        full_color_map[proj["id"]] = PROJECT_COLORS[i % len(PROJECT_COLORS)]
+
+    rows = []   # list of dicts: {label, start, end, color, is_header, is_canceled}
+    proj_task_map = {}
+    for task in tasks:
+        if not task["project_id"]:
+            continue
+        pid = task["project_id"][0]
+        proj_task_map.setdefault(pid, []).append(task)
+
+    for proj in projects:
+        pid   = proj["id"]
+        ptasks = proj_task_map.get(pid, [])
+        dated  = []
+        for t in ptasks:
+            start = t.get("planned_date_begin")
+            end   = t.get("date_deadline")
+            if not start and not end:
+                continue
+            if start and not end:
+                end = (datetime.strptime(start[:10], "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+            elif end and not start:
+                start = (datetime.strptime(end[:10], "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
+            dated.append((t, start[:10], end[:10]))
+
+        if not dated:
+            continue
+
+        # Project header row
+        all_starts = [datetime.strptime(s, "%Y-%m-%d") for _, s, _ in dated]
+        all_ends   = [datetime.strptime(e, "%Y-%m-%d") for _, _, e in dated]
+        rows.append({
+            "label":       proj["name"],
+            "start":       min(all_starts),
+            "end":         max(all_ends),
+            "color":       full_color_map.get(pid, "#666"),
+            "is_header":   True,
+            "is_canceled": False,
+        })
+
+        for t, s, e in dated:
+            stage       = t["stage_id"][1] if t["stage_id"] else ""
+            task_state  = t.get("state", "")
+            is_canceled = (task_state == "1_canceled")
+            is_approved = (stage.strip().lower() == "approved")
+
+            if is_canceled:
+                bar_color = COLOR_CANCELED
+            elif is_approved:
+                bar_color = COLOR_APPROVED
+            else:
+                bar_color = full_color_map.get(pid, "#999")
+
+            rows.append({
+                "label":       f"  {t['name']}",
+                "start":       datetime.strptime(s, "%Y-%m-%d"),
+                "end":         datetime.strptime(e, "%Y-%m-%d"),
+                "color":       bar_color,
+                "is_header":   False,
+                "is_canceled": is_canceled,
+            })
+
+    if not rows:
+        return None
+
+    n_rows      = len(rows)
+    row_height  = 0.38   # inches per row
+    fig_height  = max(8, n_rows * row_height + 3)
+    fig_width   = 28
+
+    fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+    fig.patch.set_facecolor("#f8f9fa")
+    ax.set_facecolor("#ffffff")
+
+    today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+
+    # X axis: span all dates with 2-week padding
+    all_starts = [r["start"] for r in rows]
+    all_ends   = [r["end"]   for r in rows]
+    x_min = min(all_starts) - timedelta(days=14)
+    x_max = max(all_ends)   + timedelta(days=14)
+
+    import matplotlib.dates as mdates
+    ax.set_xlim(x_min, x_max)
+    ax.set_ylim(-0.5, n_rows - 0.5)
+    ax.invert_yaxis()
+
+    # Alternating row backgrounds
+    for i in range(n_rows):
+        bg = "#f0f4f8" if i % 2 == 0 else "#ffffff"
+        ax.axhspan(i - 0.5, i + 0.5, color=bg, zorder=0)
+
+    # Weekend shading
+    d = x_min
+    while d <= x_max:
+        if d.weekday() >= 5:
+            ax.axvspan(d, d + timedelta(days=1), color="#ececec", alpha=0.5, zorder=0)
+        d += timedelta(days=1)
+
+    # Draw bars
+    for i, row in enumerate(rows):
+        s   = mdates.date2num(row["start"])
+        e   = mdates.date2num(row["end"])
+        dur = max(e - s, 0.5)
+        h   = 0.55 if row["is_header"] else 0.45
+        y   = i - h / 2
+
+        # Bar
+        rect = FancyBboxPatch(
+            (s, y), dur, h,
+            boxstyle="round,pad=0.01",
+            facecolor=row["color"],
+            edgecolor="white",
+            linewidth=0.6,
+            alpha=0.55 if row["is_canceled"] else 1.0,
+            zorder=2,
+        )
+        ax.add_patch(rect)
+
+        # Label inside bar
+        label = row["label"]
+        if row["is_canceled"]:
+            label = f"~~{label.strip()}~~"  # visual hint only; matplotlib won't strikethrough
+        fontsize  = 7.5 if row["is_header"] else 6.5
+        fontweight = "bold" if row["is_header"] else "normal"
+        mid = s + dur / 2
+        ax.text(mid, i, row["label"].strip(),
+                ha="center", va="center",
+                fontsize=fontsize, fontweight=fontweight,
+                color="white",
+                clip_on=True, zorder=3)
+
+    # Y-axis labels
+    ax.set_yticks(range(n_rows))
+    ax.set_yticklabels(
+        [r["label"] for r in rows],
+        fontsize=7, fontfamily="monospace"
+    )
+    for tick, row in zip(ax.get_yticklabels(), rows):
+        tick.set_fontweight("bold" if row["is_header"] else "normal")
+        tick.set_color("#1a1a2e" if row["is_header"] else "#333333")
+
+    # X axis — month + week grid
+    ax.xaxis.set_major_locator(mdates.MonthLocator())
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %Y"))
+    ax.xaxis.set_minor_locator(mdates.WeekdayLocator(byweekday=0))
+    ax.grid(axis="x", which="major", color="#cccccc", linewidth=0.8, zorder=1)
+    ax.grid(axis="x", which="minor", color="#eeeeee", linewidth=0.4, zorder=1)
+    plt.xticks(rotation=30, ha="right", fontsize=8)
+
+    # Today line
+    ax.axvline(mdates.date2num(today), color="#DC143C", linewidth=2,
+               linestyle="--", zorder=4, label="Today")
+    ax.text(mdates.date2num(today), -0.4, "TODAY",
+            color="#DC143C", fontsize=7, fontweight="bold",
+            ha="center", va="top", zorder=5)
+
+    # Legend
+    legend_patches = []
+    seen_projects = {}
+    for proj in projects:
+        pid = proj["id"]
+        if pid in full_color_map:
+            seen_projects[proj["name"]] = full_color_map[pid]
+    for name, color in seen_projects.items():
+        legend_patches.append(mpatches.Patch(color=color, label=name))
+    legend_patches.append(mpatches.Patch(color=COLOR_APPROVED, label="Approved"))
+    legend_patches.append(mpatches.Patch(color=COLOR_CANCELED, label="Canceled", alpha=0.5))
+
+    ax.legend(handles=legend_patches, loc="upper left",
+              fontsize=7, framealpha=0.9, ncol=min(len(legend_patches), 6),
+              bbox_to_anchor=(0, 1.02), borderaxespad=0)
+
+    # Title
+    ts = today.strftime("%B %d, %Y")
+    fig.suptitle(f"INOVUES — Full Project Gantt   ·   {ts}",
+                 fontsize=13, fontweight="bold", color="#1a1a2e", y=0.99)
+
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    plt.tight_layout(rect=[0, 0, 1, 0.97])
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=150, bbox_inches="tight",
+                facecolor=fig.get_facecolor())
+    plt.close(fig)
+    buf.seek(0)
+    return buf
+
+
 def build_gantt_html(gantt_data, gantt_links, color_map, projects, selected_project_ids):
     legend_html = "".join([
         f'<div class="lg-i">'
@@ -229,7 +426,6 @@ def build_gantt_html(gantt_data, gantt_links, color_map, projects, selected_proj
 <html><head><meta charset="utf-8">
 <script src="https://cdn.dhtmlx.com/gantt/edge/dhtmlxgantt.js"></script>
 <link  rel="stylesheet" href="https://cdn.dhtmlx.com/gantt/edge/dhtmlxgantt.css">
-<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
 <style>
 html,body{{margin:0;padding:0;height:100%;overflow:hidden;font-family:'Segoe UI',system-ui,sans-serif}}
 #gantt_here{{width:100%;height:calc(100vh - 44px)}}
@@ -249,8 +445,6 @@ html,body{{margin:0;padding:0;height:100%;overflow:hidden;font-family:'Segoe UI'
 #tb button{{background:#16213e;color:#fff;border:1px solid #0f3460;padding:4px 12px;
     border-radius:4px;cursor:pointer;font-size:12px}}
 #tb button:hover{{background:#0f3460}}
-#tb button.export-btn{{background:#1a5276;border-color:#2980b9}}
-#tb button.export-btn:hover{{background:#2980b9}}
 .lg{{display:flex;gap:12px;align-items:center;margin-left:16px;flex-wrap:wrap}}
 .lg-i{{display:flex;align-items:center;gap:4px;font-size:11px}}
 .lg-d{{width:10px;height:10px;border-radius:2px}}
@@ -261,7 +455,6 @@ html,body{{margin:0;padding:0;height:100%;overflow:hidden;font-family:'Segoe UI'
   <button onclick="gantt.ext.zoom.zoomOut()">− Zoom</button>
   <button onclick="eAll()">Expand</button>
   <button onclick="cAll()">Collapse</button>
-  <button class="export-btn" onclick="exportPNG()">📸 Export PNG</button>
   <div class="lg">{legend_html}</div>
   <div id="st">Ready</div>
 </div>
@@ -309,7 +502,6 @@ gantt.templates.task_class = function(s,e,t){{
 gantt.init("gantt_here");
 gantt.parse({data_json});
 
-// Today marker
 var todayDate = gantt.date.str_to_date("%Y-%m-%d")("{today_str}");
 gantt.addMarker({{
   start_date: todayDate,
@@ -347,34 +539,10 @@ gantt.attachEvent("onAfterLinkDelete", function(id, link){{
 
 function eAll(){{ gantt.eachTask(t=>{{t.$open=true}});  gantt.render(); }}
 function cAll(){{ gantt.eachTask(t=>{{t.$open=false}}); gantt.render(); }}
-
-function exportPNG(){{
-  ss("Generating PNG…");
-  gantt.eachTask(t=>{{t.$open=true}}); gantt.render();
-  var el = document.getElementById("gantt_here");
-  html2canvas(el, {{
-    scale: 2,
-    useCORS: true,
-    backgroundColor: "#ffffff",
-    width:  el.scrollWidth,
-    height: el.scrollHeight,
-    windowWidth:  el.scrollWidth,
-    windowHeight: el.scrollHeight
-  }}).then(function(canvas){{
-    var link = document.createElement("a");
-    var ts   = new Date().toISOString().slice(0,10);
-    link.download = "INOVUES_Gantt_" + ts + ".png";
-    link.href = canvas.toDataURL("image/png");
-    link.click();
-    ss("PNG downloaded ✓");
-  }}).catch(function(err){{
-    ss("Export failed: " + err);
-  }});
-}}
 </script></body></html>"""
 
 
-# ─── Sidebar: project filter + refresh ─────────────────────────
+# ─── Sidebar: project filter + refresh + export ────────────────
 with st.sidebar:
     st.markdown("### 📁 Projects")
 
@@ -410,10 +578,30 @@ with st.sidebar:
             st.session_state.selected_projects.remove(pid)
 
     st.markdown("---")
+
     if st.button("🔄 Refresh from Odoo", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
     st.caption("Auto-refreshes every 60s")
+
+    st.markdown("---")
+    st.markdown("### 📸 Export")
+    st.caption("Exports **all tasks across all projects** regardless of current filter.")
+
+    if st.button("Generate PNG", use_container_width=True, type="primary"):
+        with st.spinner("Rendering full Gantt…"):
+            png_buf = render_gantt_png(projects, tasks, {})
+        if png_buf:
+            fname = f"INOVUES_Gantt_{datetime.now().strftime('%Y-%m-%d')}.png"
+            st.download_button(
+                label="⬇️ Download PNG",
+                data=png_buf,
+                file_name=fname,
+                mime="image/png",
+                use_container_width=True,
+            )
+        else:
+            st.warning("No tasks with dates found to export.")
 
 
 # ─── Render ────────────────────────────────────────────────────
