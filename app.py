@@ -176,7 +176,6 @@ def build_gantt_data(projects, tasks, selected_project_ids):
         proj_color = color_map.get(proj_id, "#999")
 
         # For the interactive chart: approved=green, in_progress=project color
-        # The stripe pattern is handled via CSS background on the bar element
         bar_color = COLOR_APPROVED if status == "approved" else proj_color
 
         gantt_data.append({
@@ -384,6 +383,24 @@ def render_gantt_png(projects, tasks):
 
 
 # ─── HTML Gantt ─────────────────────────────────────────────────
+def build_stripe_css(gantt_data):
+    """Generate per-task CSS rules that apply diagonal stripes to in_progress bars.
+    Uses task_id attribute selector with !important to beat DHTMLX inline styles."""
+    rules = []
+    for t in gantt_data:
+        if t.get("status") == "in_progress" and t.get("type") != "project":
+            tid  = t["id"]
+            col  = t["proj_color"]
+            rules.append(
+                f'.gantt_task_line[task_id="{tid}"] {{'
+                f'background: repeating-linear-gradient('
+                f'45deg, transparent 0px, transparent 5px, '
+                f'rgba(255,255,255,0.38) 5px, rgba(255,255,255,0.38) 10px'
+                f'), {col} !important;}}'
+            )
+    return "\n".join(rules)
+
+
 def build_gantt_html(gantt_data, gantt_links, color_map, projects, selected_project_ids):
     legend_html = "".join([
         f'<div class="lg-i">'
@@ -401,8 +418,9 @@ def build_gantt_html(gantt_data, gantt_links, color_map, projects, selected_proj
         f'<span>In Progress</span></div>'
     )
 
-    today_str = datetime.now().strftime("%Y-%m-%d")
-    data_json = json.dumps({"data": gantt_data, "links": gantt_links})
+    today_str  = datetime.now().strftime("%Y-%m-%d")
+    data_json  = json.dumps({"data": gantt_data, "links": gantt_links})
+    stripe_css = build_stripe_css(gantt_data)
 
     return f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8">
@@ -414,21 +432,9 @@ html,body{{margin:0;padding:0;height:100%;overflow:hidden;font-family:'Segoe UI'
 .project_row{{font-weight:700;background:#f0f0f0!important}}
 .project_row .gantt_cell{{font-weight:700}}
 .gantt_task_content{{font-size:11px;font-weight:500;color:#fff;text-shadow:0 1px 2px rgba(0,0,0,.4)}}
-/* Approved: solid, bold label */
 .approved .gantt_task_content{{font-weight:700}}
-/* In Progress: diagonal stripe — must beat DHTMLX specificity */
-.gantt_task_line.in_progress,
-.in_progress > .gantt_task_line,
-.gantt_task_row .in_progress .gantt_task_line {{
-  background-image: repeating-linear-gradient(
-    45deg,
-    transparent 0px,
-    transparent 5px,
-    rgba(255,255,255,0.4) 5px,
-    rgba(255,255,255,0.4) 10px
-  ) !important;
-  background-color: inherit !important;
-}}
+/* Per-task stripe rules injected below — beat DHTMLX inline styles */
+{stripe_css}
 .gantt_link_arrow{{border-color:#e74c3c!important}}
 .gantt_line_wrapper div{{background-color:#e74c3c!important}}
 .gantt_marker{{background:rgba(220,20,60,0.12);border-left:2px solid #DC143C}}
@@ -496,8 +502,11 @@ gantt.templates.task_class = function(s,e,t){{
 gantt.init("gantt_here");
 gantt.parse({data_json});
 
-var todayDate = gantt.date.str_to_date("%Y-%m-%d")("{today_str}");
-gantt.addMarker({{start_date:todayDate, css:"today", text:"Today", title:"Today: {today_str}"}});
+// Today marker — guarded in case ext not loaded
+if(gantt.ext && gantt.ext.marker) {{
+  var todayDate = gantt.date.str_to_date("%Y-%m-%d")("{today_str}");
+  gantt.addMarker({{start_date:todayDate, css:"today", text:"Today", title:"Today: {today_str}"}});
+}}
 
 var stEl = document.getElementById('st');
 function ss(m){{ stEl.textContent=m; setTimeout(()=>stEl.textContent='Ready',3000); }}
@@ -519,37 +528,8 @@ gantt.attachEvent("onAfterLinkDelete",function(id,link){{
   nav({{gantt_action:"delete_link",src:link.source,tgt:link.target}});
 }});
 
-gantt.attachEvent("onGanttRender", function(){{
-  setTimeout(applyStripes, 0);
-}});
-
-function applyStripes(){{
-  gantt.eachTask(function(t){{
-    if(t.type === "project") return;
-    var el = document.querySelector(".gantt_task_line[task_id='" + t.id + "']");
-    if(!el) return;
-    if(t.status === "in_progress"){{
-      // Read the color DHTMLX already painted on the element
-      var computed  = window.getComputedStyle(el).backgroundColor;
-      var inlineCol = el.style.backgroundColor;
-      console.log("IN_PROGRESS task:", t.id, t.text,
-                  "| t.color:", t.color,
-                  "| t.proj_color:", t.proj_color,
-                  "| el.style.backgroundColor:", inlineCol,
-                  "| computed backgroundColor:", computed);
-      var baseColor = inlineCol || t.color || t.proj_color || "#888";
-      el.style.background = [
-        "repeating-linear-gradient(45deg, transparent 0px, transparent 5px, rgba(255,255,255,0.4) 5px, rgba(255,255,255,0.4) 10px)",
-        baseColor
-      ].join(", ");
-    }} else {{
-      el.style.background = "";
-    }}
-  }});
-}}
-
-function eAll(){{ gantt.eachTask(t=>{{t.$open=true}});  gantt.render(); setTimeout(applyStripes,50); }}
-function cAll(){{ gantt.eachTask(t=>{{t.$open=false}}); gantt.render(); setTimeout(applyStripes,50); }}
+function eAll(){{ gantt.eachTask(t=>{{t.$open=true}});  gantt.render(); }}
+function cAll(){{ gantt.eachTask(t=>{{t.$open=false}}); gantt.render(); }}
 </script></body></html>"""
 
 
