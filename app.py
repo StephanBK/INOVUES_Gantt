@@ -416,17 +416,19 @@ html,body{{margin:0;padding:0;height:100%;overflow:hidden;font-family:'Segoe UI'
 .gantt_task_content{{font-size:11px;font-weight:500;color:#fff;text-shadow:0 1px 2px rgba(0,0,0,.4)}}
 /* Approved: solid, bold label */
 .approved .gantt_task_content{{font-weight:700}}
-/* In Progress: diagonal stripe over project color */
-.in_progress .gantt_task_line{{
+/* In Progress: diagonal stripe — must beat DHTMLX specificity */
+.gantt_task_line.in_progress,
+.in_progress > .gantt_task_line,
+.gantt_task_row .in_progress .gantt_task_line {{
   background-image: repeating-linear-gradient(
     45deg,
-    transparent,
-    transparent 4px,
-    rgba(255,255,255,0.35) 4px,
-    rgba(255,255,255,0.35) 8px
+    transparent 0px,
+    transparent 5px,
+    rgba(255,255,255,0.4) 5px,
+    rgba(255,255,255,0.4) 10px
   ) !important;
+  background-color: inherit !important;
 }}
-.in_progress .gantt_task_content{{opacity:0.95}}
 .gantt_link_arrow{{border-color:#e74c3c!important}}
 .gantt_line_wrapper div{{background-color:#e74c3c!important}}
 .gantt_marker{{background:rgba(220,20,60,0.12);border-left:2px solid #DC143C}}
@@ -517,8 +519,26 @@ gantt.attachEvent("onAfterLinkDelete",function(id,link){{
   nav({{gantt_action:"delete_link",src:link.source,tgt:link.target}});
 }});
 
-function eAll(){{ gantt.eachTask(t=>{{t.$open=true}});  gantt.render(); }}
-function cAll(){{ gantt.eachTask(t=>{{t.$open=false}}); gantt.render(); }}
+gantt.attachEvent("onGanttRender", function(){{
+  setTimeout(applyStripes, 0);
+}});
+
+function applyStripes(){{
+  gantt.eachTask(function(t){{
+    if(t.type === "project") return;
+    var el = document.querySelector(".gantt_task_line[task_id='" + t.id + "']");
+    if(!el) return;
+    if(t.status === "in_progress"){{
+      el.style.backgroundImage = "repeating-linear-gradient(45deg, transparent 0px, transparent 5px, rgba(255,255,255,0.45) 5px, rgba(255,255,255,0.45) 10px)";
+      el.style.backgroundSize  = "14px 14px";
+    }} else {{
+      el.style.backgroundImage = "";
+    }}
+  }});
+}}
+
+function eAll(){{ gantt.eachTask(t=>{{t.$open=true}});  gantt.render(); setTimeout(applyStripes,50); }}
+function cAll(){{ gantt.eachTask(t=>{{t.$open=false}}); gantt.render(); setTimeout(applyStripes,50); }}
 </script></body></html>"""
 
 
