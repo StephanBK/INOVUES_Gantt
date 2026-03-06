@@ -128,6 +128,26 @@ PROJECT_COLORS = [
     "#3B1F2B", "#44BBA4", "#E94F37", "#393E41"
 ]
 
+# Canonical pipeline stage order — tasks are sorted by this within each project
+STAGE_ORDER = [
+    "Engineering",
+    "Procurement",
+    "Fabrication",
+    "Finishing",
+    "Packaging",
+    "Shipping",
+    "Installation",
+]
+
+def stage_sort_key(task):
+    """Return (stage_index, sequence) so tasks sort by pipeline stage first."""
+    stage_name = task["stage_id"][1] if task["stage_id"] else ""
+    # Case-insensitive match against STAGE_ORDER
+    for i, s in enumerate(STAGE_ORDER):
+        if s.lower() in stage_name.lower():
+            return (i, task.get("sequence", 9999))
+    return (len(STAGE_ORDER), task.get("sequence", 9999))  # unknown stages go last
+
 
 # ─── Build data for interactive Gantt ───────────────────────────
 def build_gantt_data(projects, tasks, selected_project_ids):
@@ -145,7 +165,10 @@ def build_gantt_data(projects, tasks, selected_project_ids):
                             "type": "project", "open": True,
                             "color": color_map[pid]})
 
-    for task in tasks:
+    # Sort tasks by pipeline stage order (Engineering → ... → Installation)
+    sorted_tasks = sorted(tasks, key=stage_sort_key)
+
+    for task in sorted_tasks:
         if not task["project_id"]:
             continue
         proj_id = task["project_id"][0]
@@ -214,7 +237,8 @@ def render_gantt_png(projects, tasks):
     rows = []
     for proj in projects:
         pid    = proj["id"]
-        ptasks = proj_task_map.get(pid, [])
+        # Sort tasks within each project by pipeline stage order
+        ptasks = sorted(proj_task_map.get(pid, []), key=stage_sort_key)
         dated  = []
         for t in ptasks:
             start = t.get("planned_date_begin")
