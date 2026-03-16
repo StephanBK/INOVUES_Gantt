@@ -473,7 +473,8 @@ def build_gantt_html(gantt_data, gantt_links, color_map, projects, selected_proj
 <link  rel="stylesheet" href="https://cdn.dhtmlx.com/gantt/edge/dhtmlxgantt.css">
 <style>
 html,body{{margin:0;padding:0;height:100%;overflow:hidden;font-family:'Segoe UI',system-ui,sans-serif}}
-#gantt_here{{width:100%;height:calc(100vh - 44px)}}
+#wrap{{display:flex;flex-direction:column;height:100vh;overflow:hidden}}
+#gantt_here{{width:100%;flex:1;min-height:0}}
 .project_row{{font-weight:700;background:#f0f0f0!important}}
 .project_row .gantt_cell{{font-weight:700}}
 .gantt_task_content{{font-size:11px;font-weight:500;color:#fff;text-shadow:0 1px 2px rgba(0,0,0,.4)}}
@@ -485,25 +486,37 @@ html,body{{margin:0;padding:0;height:100%;overflow:hidden;font-family:'Segoe UI'
 .gantt_marker{{background:rgba(220,20,60,0.12);border-left:2px solid #DC143C}}
 .gantt_marker_content{{background:#DC143C;color:#fff;font-size:10px;
     padding:2px 5px;border-radius:0 3px 3px 0;white-space:nowrap}}
-#tb{{background:#1a1a2e;color:#fff;padding:6px 16px;display:flex;align-items:center;gap:10px;
-    font-size:13px;height:44px;box-sizing:border-box}}
-#tb button{{background:#16213e;color:#fff;border:1px solid #0f3460;padding:4px 12px;
-    border-radius:4px;cursor:pointer;font-size:12px}}
+#tb{{background:#1a1a2e;color:#fff;padding:6px 16px;display:flex;align-items:center;gap:8px;
+    font-size:13px;height:44px;box-sizing:border-box;
+    position:sticky;top:0;z-index:999;flex-shrink:0}}
+#tb button{{background:#16213e;color:#fff;border:1px solid #0f3460;padding:4px 11px;
+    border-radius:4px;cursor:pointer;font-size:12px;white-space:nowrap}}
 #tb button:hover{{background:#0f3460}}
+#tb .sep{{width:1px;height:22px;background:rgba(255,255,255,0.15);margin:0 4px}}
+#tb .zoom-label{{font-size:11px;opacity:0.7;min-width:54px;text-align:center}}
+#scroll-hint{{font-size:10px;opacity:0.4;margin-left:4px}}
 .lg{{display:flex;gap:12px;align-items:center;margin-left:16px;flex-wrap:wrap}}
 .lg-i{{display:flex;align-items:center;gap:4px;font-size:11px}}
 .lg-d{{width:14px;height:10px;border-radius:2px;border:1px solid rgba(255,255,255,0.2)}}
 #st{{margin-left:auto;opacity:.6;font-size:12px}}
 </style></head><body>
+<div id="wrap">
 <div id="tb">
-  <button onclick="gantt.ext.zoom.zoomIn()">+ Zoom</button>
-  <button onclick="gantt.ext.zoom.zoomOut()">− Zoom</button>
-  <button onclick="eAll()">Expand</button>
-  <button onclick="cAll()">Collapse</button>
+  <button onclick="zIn()" title="Zoom In  [+]">＋ Zoom</button>
+  <span class="zoom-label" id="zlbl">Weeks</span>
+  <button onclick="zOut()" title="Zoom Out  [−]">－ Zoom</button>
+  <div class="sep"></div>
+  <button onclick="scrollLeft()" title="Scroll Left  [←]">◀</button>
+  <button onclick="scrollRight()" title="Scroll Right  [→]">▶</button>
+  <button onclick="goToday()" title="Jump to Today  [T]">Today</button>
+  <div class="sep"></div>
+  <button onclick="eAll()" title="Expand All  [E]">Expand</button>
+  <button onclick="cAll()" title="Collapse All  [C]">Collapse</button>
   <div class="lg">{legend_html}</div>
-  <div id="st">Ready</div>
+  <div id="st">Ready · Use +/− to zoom · ←/→ to scroll · T for today</div>
 </div>
 <div id="gantt_here"></div>
+</div>
 <script>
 gantt.config.date_format         = "%Y-%m-%d";
 gantt.config.drag_move           = true;
@@ -573,8 +586,50 @@ gantt.attachEvent("onAfterLinkDelete",function(id,link){{
   nav({{gantt_action:"delete_link",src:link.source,tgt:link.target}});
 }});
 
+// Zoom levels in order
+var zLevels = ["Days","Weeks","Months","Quarters"];
+var zIdx = 1; // start at Weeks
+function updateZoomLabel(){{
+  document.getElementById("zlbl").textContent = zLevels[zIdx];
+}}
+function zIn(){{
+  if(zIdx > 0){{ zIdx--; gantt.ext.zoom.setLevel(zLevels[zIdx]); updateZoomLabel(); }}
+}}
+function zOut(){{
+  if(zIdx < zLevels.length-1){{ zIdx++; gantt.ext.zoom.setLevel(zLevels[zIdx]); updateZoomLabel(); }}
+}}
+
+// Scroll left/right by ~30 days
+function scrollLeft(){{
+  var state = gantt.getScrollState();
+  gantt.scrollTo(Math.max(0, state.x - 300), state.y);
+}}
+function scrollRight(){{
+  var state = gantt.getScrollState();
+  gantt.scrollTo(state.x + 300, state.y);
+}}
+
+// Jump to today
+function goToday(){{
+  var today = new Date();
+  gantt.showDate(today);
+}}
+
 function eAll(){{ gantt.eachTask(t=>{{t.$open=true}});  gantt.render(); }}
 function cAll(){{ gantt.eachTask(t=>{{t.$open=false}}); gantt.render(); }}
+
+// Keyboard shortcuts
+document.addEventListener("keydown", function(e){{
+  // Ignore if typing in an input
+  if(e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
+  if(e.key === "+" || e.key === "=") {{ zIn(); }}
+  else if(e.key === "-" || e.key === "_") {{ zOut(); }}
+  else if(e.key === "ArrowLeft")  {{ scrollLeft(); }}
+  else if(e.key === "ArrowRight") {{ scrollRight(); }}
+  else if(e.key === "t" || e.key === "T") {{ goToday(); }}
+  else if(e.key === "e" || e.key === "E") {{ eAll(); }}
+  else if(e.key === "c" || e.key === "C") {{ cAll(); }}
+}});
 </script></body></html>"""
 
 
